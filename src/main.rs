@@ -1,29 +1,73 @@
-use clap::{Parser, Subcommand};
+mod builtin;
+mod lexer;
+mod parser;
+use std::io;
+use std::io::Write;
+use std::path::PathBuf;
 
-#[derive(Parser, Debug)]
-#[command(name = "kria-terminal", version, about = "结构化命令执行器")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
+use crate::builtin::BuiltinResult::Continue;
+
+pub struct Shell {
+    pub cwd: PathBuf,
+    pub prev: Option<PathBuf>,
 }
 
-#[derive(Subcommand, Debug)]
-enum Commands {
-    // 执行一个程序并返回结构化结果
-    Run {
-        // 工作目录，默认当前目录
-        #[arg(long)]
-        cwd: Option<String>,
-        // 要执行的程序
-        program: String,
-        // 传给该程序的参数
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
+impl Shell {
+    fn new() -> Self {
+        Self {
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            prev: None,
+        }
+    }
+
+    fn print_prompt(&self) {
+        print!("{}# ", self.cwd.display());
+        io::stdout().flush().unwrap();
+    }
 }
 
 fn main() {
-    let cli = Cli::parse();
-    // 先只打印解析结果，验证对不对
-    println!("{:#?}", cli);
+    let mut shell = Shell::new();
+    loop {
+        shell.print_prompt();
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let tokens: Vec<lexer::Token> = lexer::lex(&line);
+                if tokens.is_empty() {
+                    continue;
+                }
+                let pipeline = match parser::parse(&tokens) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("解析失败: {}", e.message);
+                        continue;
+                    }
+                };
+                let cmd = match pipeline.commands.as_slice() {
+                    [cmd] => cmd,
+                    [] => {
+                        eprintln!("没有命令");
+                        continue;
+                    }
+                    _ => {
+                        eprintln!("暂不支持管道");
+                        continue;
+                    }
+                };
+                match builtin::dispatch(&mut shell, cmd) {
+                    builtin::BuiltinResult::Exit => break,
+                    builtin::BuiltinResult::NotFound => {
+                        println!("未实现的命令: {}", cmd.program);
+                    }
+                    builtin::BuiltinResult::Continue => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("读输入失败: {e}");
+                break;
+            }
+        }
+    }
 }
