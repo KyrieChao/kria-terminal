@@ -1,6 +1,10 @@
 mod builtin;
 mod lexer;
 mod parser;
+mod pty;
+mod screen;
+mod vt;
+mod window;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -120,6 +124,15 @@ fn run_pipeline(snapshot: &ShellSnapshot, pipeline: &parser::Pipeline) -> io::Re
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("gui") {
+        window::run();
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("pty") {
+        pty::run();
+        return;
+    }
+
     let mut shell = Shell::new();
     loop {
         shell.print_prompt();
