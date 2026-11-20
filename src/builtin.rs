@@ -1,83 +1,88 @@
-use crate::Shell;
+use crate::ShellSnapshot;
 use crate::parser::Command;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
-pub enum BuiltinResult {
-    Continue,
+pub enum CmdOutcome {
+    Done,
+    ChangeDir(PathBuf), // 请求改到某个目录，由调用方决定应用与否
     Exit,
-    NotFound,
 }
 
-pub fn dispatch(shell: &mut Shell, cmd: &Command) -> BuiltinResult {
+pub fn is_builtin(name: &str) -> bool {
+    matches!(name, "exit" | "pwd" | "cd" | "clear" | "ls")
+}
+
+pub fn run_builtin(
+    shell: &ShellSnapshot,
+    cmd: &Command,
+    stdout: &mut dyn Write,
+) -> Option<CmdOutcome> {
     match cmd.program.as_str() {
         "exit" => {
-            println!("bye");
-            BuiltinResult::Exit
+            let _ = writeln!(stdout, "bye");
+            Some(CmdOutcome::Exit)
         }
         "pwd" => {
-            println!("{}", shell.cwd.display());
-            BuiltinResult::Continue
+            let _ = writeln!(stdout, "{}", shell.cwd.display());
+            Some(CmdOutcome::Done)
         }
-        "cd" => {
-            handle_cd(shell, cmd);
-            BuiltinResult::Continue
-        }
+        "cd" => match handle_cd(shell, cmd, stdout) {
+            Some(new_cwd) => Some(CmdOutcome::ChangeDir(new_cwd)),
+            None => Some(CmdOutcome::Done),
+        },
         "clear" => {
-            let mut stdout = io::stdout().lock();
-            if let Err(error) = stdout
-                .write_all(b"\x1b[2J\x1b[H")
-                .and_then(|()| stdout.flush())
-            {
-                eprintln!("clear: {error}");
-            }
-            BuiltinResult::Continue
+            let _ = stdout.write_all(b"\x1b[2J\x1b[H");
+            let _ = stdout.flush();
+            Some(CmdOutcome::Done)
         }
         "ls" => {
             let result = std::fs::read_dir(&shell.cwd);
             match result {
                 Ok(entries) => {
+                    let mut names: Vec<String> = Vec::new();
                     for entry in entries {
                         match entry {
-                            Ok(entry) => println!("{}", entry.file_name().to_string_lossy()),
+                            Ok(entry) => {
+                                names.push(entry.file_name().to_string_lossy().into_owned())
+                            }
                             Err(e) => eprintln!("读取条目失败：{}", e),
                         }
+                    }
+                    names.sort();
+                    for name in names {
+                        let _ = writeln!(stdout, "{name}");
                     }
                 }
                 Err(e) => eprintln!("打开失败：{}", e),
             }
-            BuiltinResult::Continue
+            Some(CmdOutcome::Done)
         }
-        _ => BuiltinResult::NotFound,
+        _ => None,
     }
 }
 
-fn handle_cd(shell: &mut Shell, cmd: &Command) {
+fn handle_cd(shell: &ShellSnapshot, cmd: &Command, stdout: &mut dyn Write) -> Option<PathBuf> {
     match cmd.args.first().map(String::as_str) {
         Some("-") => {
-            let new_cwd = match shell.prev.as_ref() {
-                Some(p) => resolve_cd(&shell.cwd, p),
-                None => {
-                    eprintln!("cd: OLDPWD not set");
-                    return;
-                }
-            };
-            if commit_cd(shell, new_cwd) {
-                println!("{}", shell.cwd.display());
-            }
+            let prev = shell.prev.as_ref()?;
+            let new_cwd = resolve_cd(&shell.cwd, prev);
+            validate_dir(new_cwd)
         }
         Some(arg) => {
             let new_cwd = resolve_cd(&shell.cwd, Path::new(arg));
-            commit_cd(shell, new_cwd);
+            validate_dir(new_cwd)
         }
         None => {
             if cfg!(windows) {
-                println!("{}", shell.cwd.display());
+                let _ = writeln!(stdout, "{}", shell.cwd.display());
+                None
             } else if let Some(home) = home_dir() {
                 let new_cwd = resolve_cd(&shell.cwd, &home);
-                commit_cd(shell, new_cwd);
+                validate_dir(new_cwd)
             } else {
                 eprintln!("cd: HOME not set");
+                None
             }
         }
     }
@@ -110,15 +115,12 @@ fn resolve_cd(cwd: &Path, target: &Path) -> PathBuf {
     normalize(&joined)
 }
 
-fn commit_cd(shell: &mut Shell, new_cwd: PathBuf) -> bool {
+fn validate_dir(new_cwd: PathBuf) -> Option<PathBuf> {
     match std::fs::metadata(&new_cwd) {
-        Ok(m) if m.is_dir() => {
-            shell.prev = Some(std::mem::replace(&mut shell.cwd, new_cwd));
-            true
-        }
+        Ok(m) if m.is_dir() => Some(new_cwd),
         Ok(_) => {
             eprintln!("cd: {}: Not a directory", new_cwd.display());
-            false
+            None
         }
         Err(e) => {
             let msg = match e.kind() {
@@ -127,7 +129,7 @@ fn commit_cd(shell: &mut Shell, new_cwd: PathBuf) -> bool {
                 _ => e.to_string(),
             };
             eprintln!("cd: {}: {}", new_cwd.display(), msg);
-            false
+            None
         }
     }
 }
