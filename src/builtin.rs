@@ -1,5 +1,6 @@
 use crate::ShellSnapshot;
 use crate::parser::Command;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -10,7 +11,7 @@ pub enum CmdOutcome {
 }
 
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "exit" | "pwd" | "cd" | "clear" | "ls")
+    matches!(name, "exit" | "pwd" | "cd" | "clear" | "ls" | "mkdir")
 }
 
 pub fn run_builtin(
@@ -55,6 +56,68 @@ pub fn run_builtin(
                     }
                 }
                 Err(e) => eprintln!("打开失败：{}", e),
+            }
+            Some(CmdOutcome::Done)
+        }
+        "mkdir" => {
+            let mut parents = false;
+            let mut enter = false;
+            let mut paths: Vec<&str> = Vec::new();
+            let mut only_paths = false;
+
+            for arg in &cmd.args {
+                if only_paths {
+                    paths.push(arg.as_str());
+                    continue;
+                }
+                match arg.as_str() {
+                    "--" => only_paths = true,
+                    "-p" => parents = true,
+                    "-e" => enter = true,
+                    a if a.len() > 1 && a.starts_with('-') => {
+                        for ch in a.chars().skip(1) {
+                            match ch {
+                                'p' => parents = true,
+                                'e' => enter = true,
+                                _ => {
+                                    eprintln!("mkdir: unknown option -- '{ch}'");
+                                    return Some(CmdOutcome::Done);
+                                }
+                            }
+                        }
+                    }
+                    _ => paths.push(arg.as_str()),
+                }
+            }
+            if paths.is_empty() {
+                eprintln!("mkdir: missing operand");
+                return Some(CmdOutcome::Done);
+            }
+            if enter && paths.len() > 1 {
+                eprintln!("mkdir: -e requires exactly one path");
+                return Some(CmdOutcome::Done);
+            }
+            let mut failed = false;
+            for p in &paths {
+                let target = resolve_cd(&shell.cwd, Path::new(p));
+                let r = if parents {
+                    fs::create_dir_all(&target)
+                } else {
+                    fs::create_dir(&target)
+                };
+                if let Err(e) = r {
+                    eprintln!("mkdir: {}: {}", target.display(), e);
+                    failed = true;
+                }
+            }
+            if failed {
+                return Some(CmdOutcome::Done);
+            }
+            if enter {
+                return Some(CmdOutcome::ChangeDir(resolve_cd(
+                    &shell.cwd,
+                    Path::new(paths[0]),
+                )));
             }
             Some(CmdOutcome::Done)
         }
