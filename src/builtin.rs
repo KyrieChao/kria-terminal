@@ -3,15 +3,42 @@ use crate::parser::Command;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
+
+#[derive(Debug, PartialEq)]
+pub enum BuiltinCommand {
+    Exit,
+    Pwd,
+    Cd,
+    Clear,
+    Ls,
+    Mkdir,
+}
 
 pub enum CmdOutcome {
     Done,
-    ChangeDir(PathBuf), // 请求改到某个目录，由调用方决定应用与否
+    ChangeDir(PathBuf),
     Exit,
 }
 
+impl FromStr for BuiltinCommand {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "exit" => Ok(BuiltinCommand::Exit),
+            "pwd" => Ok(BuiltinCommand::Pwd),
+            "cd" => Ok(BuiltinCommand::Cd),
+            "clear" => Ok(BuiltinCommand::Clear),
+            "ls" => Ok(BuiltinCommand::Ls),
+            "mkdir" => Ok(BuiltinCommand::Mkdir),
+            _ => Err(()),
+        }
+    }
+}
+
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "exit" | "pwd" | "cd" | "clear" | "ls" | "mkdir")
+    BuiltinCommand::from_str(name).is_ok()
 }
 
 pub fn run_builtin(
@@ -19,27 +46,52 @@ pub fn run_builtin(
     cmd: &Command,
     stdout: &mut dyn Write,
 ) -> Option<CmdOutcome> {
-    match cmd.program.as_str() {
-        "exit" => {
+    let builtin = BuiltinCommand::from_str(&cmd.program).ok()?;
+
+    Some(match builtin {
+        BuiltinCommand::Exit => builtins::exit::run(stdout),
+        BuiltinCommand::Pwd => builtins::pwd::run(shell, stdout),
+        BuiltinCommand::Cd => builtins::cd::run(shell, cmd, stdout),
+        BuiltinCommand::Clear => builtins::clear::run(stdout),
+        BuiltinCommand::Ls => builtins::ls::run(shell, cmd, stdout),
+        BuiltinCommand::Mkdir => builtins::mkdir::run(shell, cmd, stdout),
+    })
+}
+
+mod builtins {
+    pub mod exit {
+        use super::super::*;
+
+        pub fn run(stdout: &mut dyn Write) -> CmdOutcome {
             let _ = writeln!(stdout, "bye");
-            Some(CmdOutcome::Exit)
+            CmdOutcome::Exit
         }
-        "pwd" => {
+    }
+
+    pub mod pwd {
+        use super::super::*;
+
+        pub fn run(shell: &ShellSnapshot, stdout: &mut dyn Write) -> CmdOutcome {
             let _ = writeln!(stdout, "{}", shell.cwd.display());
-            Some(CmdOutcome::Done)
+            CmdOutcome::Done
         }
-        "cd" => match handle_cd(shell, cmd, stdout) {
-            Some(new_cwd) => Some(CmdOutcome::ChangeDir(new_cwd)),
-            None => Some(CmdOutcome::Done),
-        },
-        "clear" => {
+    }
+
+    pub mod clear {
+        use super::super::*;
+
+        pub fn run(stdout: &mut dyn Write) -> CmdOutcome {
             let _ = stdout.write_all(b"\x1b[2J\x1b[H");
             let _ = stdout.flush();
-            Some(CmdOutcome::Done)
+            CmdOutcome::Done
         }
-        "ls" => {
-            let result = std::fs::read_dir(&shell.cwd);
-            match result {
+    }
+
+    pub mod ls {
+        use super::super::*;
+
+        pub fn run(shell: &ShellSnapshot, _cmd: &Command, stdout: &mut dyn Write) -> CmdOutcome {
+            match fs::read_dir(&shell.cwd) {
                 Ok(entries) => {
                     let mut names: Vec<String> = Vec::new();
                     for entry in entries {
@@ -57,9 +109,56 @@ pub fn run_builtin(
                 }
                 Err(e) => eprintln!("打开失败：{}", e),
             }
-            Some(CmdOutcome::Done)
+            CmdOutcome::Done
         }
-        "mkdir" => {
+    }
+
+    pub mod cd {
+        use super::super::*;
+
+        pub fn run(shell: &ShellSnapshot, cmd: &Command, stdout: &mut dyn Write) -> CmdOutcome {
+            match cmd.args.first().map(String::as_str) {
+                Some("-") => {
+                    if let Some(prev) = shell.prev.as_ref() {
+                        let new_cwd = resolve_cd(&shell.cwd, prev);
+                        if let Some(new_cwd) = validate_dir(new_cwd) {
+                            return CmdOutcome::ChangeDir(new_cwd);
+                        }
+                    }
+                    CmdOutcome::Done
+                }
+                Some(arg) => {
+                    let new_cwd = resolve_cd(&shell.cwd, Path::new(arg));
+                    if let Some(new_cwd) = validate_dir(new_cwd) {
+                        CmdOutcome::ChangeDir(new_cwd)
+                    } else {
+                        CmdOutcome::Done
+                    }
+                }
+                None => {
+                    if cfg!(windows) {
+                        let _ = writeln!(stdout, "{}", shell.cwd.display());
+                        CmdOutcome::Done
+                    } else if let Some(home) = home_dir() {
+                        let new_cwd = resolve_cd(&shell.cwd, &home);
+                        if let Some(new_cwd) = validate_dir(new_cwd) {
+                            CmdOutcome::ChangeDir(new_cwd)
+                        } else {
+                            CmdOutcome::Done
+                        }
+                    } else {
+                        eprintln!("cd: HOME not set");
+                        CmdOutcome::Done
+                    }
+                }
+            }
+        }
+    }
+
+    pub mod mkdir {
+        use super::super::*;
+
+        pub fn run(shell: &ShellSnapshot, cmd: &Command, _stdout: &mut dyn Write) -> CmdOutcome {
             let mut parents = false;
             let mut enter = false;
             let mut paths: Vec<&str> = Vec::new();
@@ -81,7 +180,7 @@ pub fn run_builtin(
                                 'e' => enter = true,
                                 _ => {
                                     eprintln!("mkdir: unknown option -- '{ch}'");
-                                    return Some(CmdOutcome::Done);
+                                    return CmdOutcome::Done;
                                 }
                             }
                         }
@@ -89,14 +188,16 @@ pub fn run_builtin(
                     _ => paths.push(arg.as_str()),
                 }
             }
+
             if paths.is_empty() {
                 eprintln!("mkdir: missing operand");
-                return Some(CmdOutcome::Done);
+                return CmdOutcome::Done;
             }
             if enter && paths.len() > 1 {
                 eprintln!("mkdir: -e requires exactly one path");
-                return Some(CmdOutcome::Done);
+                return CmdOutcome::Done;
             }
+
             let mut failed = false;
             for p in &paths {
                 let target = resolve_cd(&shell.cwd, Path::new(p));
@@ -110,43 +211,17 @@ pub fn run_builtin(
                     failed = true;
                 }
             }
-            if failed {
-                return Some(CmdOutcome::Done);
-            }
-            if enter {
-                return Some(CmdOutcome::ChangeDir(resolve_cd(
-                    &shell.cwd,
-                    Path::new(paths[0]),
-                )));
-            }
-            Some(CmdOutcome::Done)
-        }
-        _ => None,
-    }
-}
 
-fn handle_cd(shell: &ShellSnapshot, cmd: &Command, stdout: &mut dyn Write) -> Option<PathBuf> {
-    match cmd.args.first().map(String::as_str) {
-        Some("-") => {
-            let prev = shell.prev.as_ref()?;
-            let new_cwd = resolve_cd(&shell.cwd, prev);
-            validate_dir(new_cwd)
-        }
-        Some(arg) => {
-            let new_cwd = resolve_cd(&shell.cwd, Path::new(arg));
-            validate_dir(new_cwd)
-        }
-        None => {
-            if cfg!(windows) {
-                let _ = writeln!(stdout, "{}", shell.cwd.display());
-                None
-            } else if let Some(home) = home_dir() {
-                let new_cwd = resolve_cd(&shell.cwd, &home);
-                validate_dir(new_cwd)
-            } else {
-                eprintln!("cd: HOME not set");
-                None
+            if failed {
+                return CmdOutcome::Done;
             }
+
+            if enter {
+                let target = resolve_cd(&shell.cwd, Path::new(paths[0]));
+                return CmdOutcome::ChangeDir(target);
+            }
+
+            CmdOutcome::Done
         }
     }
 }
