@@ -199,6 +199,7 @@ pub fn run() {
     let mut buffer = vec![BG_COLOR; WIDTH * HEIGHT];
     let mut parser = crate::vt::Parser::new();
     let mut input = String::new();
+    let start = std::time::Instant::now();
 
     while window.is_open() {
         // 把 PTY 这段时间收到的字节全部喂给解析器
@@ -217,12 +218,21 @@ pub fn run() {
         let shift = shift_down(&window);
         let ctrl = ctrl_down();
         for key in window.get_keys_pressed(minifb::KeyRepeat::No) {
-            if ctrl && key == minifb::Key::V {
-                if let Some(text) = read_clipboard() {
-                    // 终端里换行一律用 CR
-                    input.push_str(&text.replace("\r\n", "\r").replace('\n', "\r"));
+            if ctrl {
+                match key {
+                    minifb::Key::V => {
+                        if let Some(text) = read_clipboard() {
+                            // 终端里换行一律用 CR
+                            input.push_str(&text.replace("\r\n", "\r").replace('\n', "\r"));
+                        }
+                        continue;
+                    }
+                    minifb::Key::C => {
+                        input.push('\x03');
+                        continue;
+                    }
+                    _ => {}
                 }
-                continue;
             }
             input.push_str(key_to_str(key, shift));
         }
@@ -232,7 +242,9 @@ pub fn run() {
             input.clear();
         }
 
-        screen.render(&mut buffer, WIDTH, HEIGHT, &fonts);
+        // 每 500ms 翻转一次，形成闪烁
+        let blink = (start.elapsed().as_millis() / 500) % 2 == 0;
+        screen.render(&mut buffer, WIDTH, HEIGHT, &fonts, blink);
         window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
     }
 

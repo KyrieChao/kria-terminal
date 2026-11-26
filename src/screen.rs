@@ -153,7 +153,14 @@ impl Screen {
     }
 
 
-    pub fn render(&self, buffer: &mut [u32], width: usize, height: usize, fonts: &FontSet) {
+    pub fn render(
+        &self,
+        buffer: &mut [u32],
+        width: usize,
+        height: usize,
+        fonts: &FontSet,
+        show_cursor: bool,
+    ) {
         // 第一遍：铺全部背景。
         // 必须先铺完再画字，否则中文字形跨到右边一格时，会被那一格的背景擦掉。
         for y in 0..self.rows {
@@ -199,6 +206,22 @@ impl Screen {
                     cell.fg,
                 );
             }
+        }
+
+        // 光标画成格子底部的两条横线，不遮挡字形
+        if show_cursor {
+            let px = (self.cx * self.cell_w) as isize;
+            let py = (self.cy * self.cell_h) as isize;
+            fill_rect(
+                buffer,
+                width,
+                height,
+                px,
+                py + (self.cell_h - 2) as isize,
+                self.cell_w,
+                2,
+                FG_COLOR,
+            );
         }
     }
 }
