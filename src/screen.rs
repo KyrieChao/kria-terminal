@@ -1,6 +1,4 @@
-use fontdue::Font;
-
-use crate::window::{draw_glyph, BG_COLOR, FG_COLOR};
+use crate::window::{draw_glyph, is_wide, FontSet, BG_COLOR, FG_COLOR};
 
 #[derive(Clone)]
 pub struct Cell {
@@ -19,6 +17,33 @@ impl Default for Cell {
     }
 }
 
+/// 用单色填满一块矩形，带越界裁剪
+fn fill_rect(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    px: isize,
+    py: isize,
+    w: usize,
+    h: usize,
+    color: u32,
+) {
+    for gy in 0..h {
+        let by = py + gy as isize;
+        if by < 0 || by >= height as isize {
+            continue;
+        }
+        let row = by as usize * width;
+        for gx in 0..w {
+            let bx = px + gx as isize;
+            if bx < 0 || bx >= width as isize {
+                continue;
+            }
+            buffer[row + bx as usize] = color;
+        }
+    }
+}
+
 pub struct Screen {
     pub cols: usize,
     pub rows: usize,
@@ -33,9 +58,9 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub fn new(cols: usize, rows: usize, font: &Font, font_size: f32) -> Self {
+    pub fn new(cols: usize, rows: usize, fonts: &FontSet, font_size: f32) -> Self {
         // 等宽字体：用 'M' 的 advance 作为单元宽度，行高取字号的 1.2 倍
-        let (metrics, _) = font.rasterize('M', font_size);
+        let (metrics, _) = fonts.rasterize('M', font_size);
         let cell_w = metrics.advance_width.ceil() as usize;
         let cell_h = (font_size * 1.2).ceil() as usize;
 
@@ -72,10 +97,16 @@ impl Screen {
         }
     }
 
-    /// 在光标处写字并前进一格，到行尾自动换行
+    /// 在光标处写字并前进，到行尾自动换行；宽字符占两格
     pub fn write_char(&mut self, ch: char) {
+        let w = if is_wide(ch) { 2 } else { 1 };
+        // 剩余空间放不下宽字符时先换行，避免把字劈成两半
+        if self.cx + w > self.cols {
+            self.cx = 0;
+            self.line_feed();
+        }
         self.put(self.cx, self.cy, ch);
-        self.cx += 1;
+        self.cx += w;
         if self.cx >= self.cols {
             self.cx = 0;
             self.line_feed();
@@ -121,34 +152,38 @@ impl Screen {
         self.cells.resize(self.cols * self.rows, Cell::default());
     }
 
-    pub fn render(&self, buffer: &mut [u32], width: usize, height: usize, font: &Font) {
+
+    pub fn render(&self, buffer: &mut [u32], width: usize, height: usize, fonts: &FontSet) {
+        // 第一遍：铺全部背景。
+        // 必须先铺完再画字，否则中文字形跨到右边一格时，会被那一格的背景擦掉。
         for y in 0..self.rows {
             for x in 0..self.cols {
                 let cell = &self.cells[y * self.cols + x];
-                let px = (x * self.cell_w) as isize;
-                let py = (y * self.cell_h) as isize;
+                fill_rect(
+                    buffer,
+                    width,
+                    height,
+                    (x * self.cell_w) as isize,
+                    (y * self.cell_h) as isize,
+                    self.cell_w,
+                    self.cell_h,
+                    cell.bg,
+                );
+            }
+        }
 
-                // 先铺背景
-                for gy in 0..self.cell_h {
-                    let by = py + gy as isize;
-                    if by < 0 || by >= height as isize {
-                        continue;
-                    }
-                    let row = by as usize * width;
-                    for gx in 0..self.cell_w {
-                        let bx = px + gx as isize;
-                        if bx < 0 || bx >= width as isize {
-                            continue;
-                        }
-                        buffer[row + bx as usize] = cell.bg;
-                    }
-                }
-
+        // 第二遍：画字形
+        for y in 0..self.rows {
+            for x in 0..self.cols {
+                let cell = &self.cells[y * self.cols + x];
                 if cell.ch == ' ' {
                     continue;
                 }
 
-                let (metrics, bitmap) = font.rasterize(cell.ch, self.font_size);
+                let (metrics, bitmap) = fonts.rasterize(cell.ch, self.font_size);
+                let px = (x * self.cell_w) as isize;
+                let py = (y * self.cell_h) as isize;
+
                 draw_glyph(
                     buffer,
                     width,

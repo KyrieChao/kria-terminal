@@ -100,10 +100,24 @@ fn csi_home_by_empty_param() {
 fn utf8_chinese_decoded() {
     let mut screen = make_screen();
     let mut p = Parser::new();
-    // "你好" 的 UTF-8 编码
+    // "你好" 的 UTF-8 编码；宽字符各占两格
     p.feed("你好".as_bytes(), &mut screen);
     assert_eq!(screen.cells[0].ch, '你');
-    assert_eq!(screen.cells[1].ch, '好');
+    assert_eq!(screen.cells[1].ch, ' ');
+    assert_eq!(screen.cells[2].ch, '好');
+    assert_eq!((screen.cx, screen.cy), (4, 0));
+}
+
+#[test]
+fn wide_char_wraps_instead_of_splitting() {
+    let mut screen = make_screen();
+    let mut p = Parser::new();
+    // 屏幕宽 20：写 19 个 a 后光标在第 19 列，只剩 1 格放不下宽字符
+    p.feed(&[b'a'; 19], &mut screen);
+    p.feed("你".as_bytes(), &mut screen);
+    assert_eq!(screen.cells[18].ch, 'a');
+    assert_eq!(screen.cells[20].ch, '你');
+    assert_eq!((screen.cx, screen.cy), (2, 1));
 }
 
 #[test]
